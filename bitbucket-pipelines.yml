@@ -1,0 +1,82 @@
+definitions:
+  steps:
+    - step: &package-install
+        script:
+          - echo "@pqina:registry=https://npm.pqina.nl/" > .npmrc
+          - echo "//npm.pqina.nl/:_authToken=${PQINA_NPM_KEY}" >> .npmrc
+          - npm ci
+        caches:
+          - node
+    - step: &package-build
+        # runs-on:
+        #   - self.hosted
+        #   - linux
+        script:
+          - export REACT_APP_VERSION=$(node -p "require('./package.json').version")
+          - export REACT_APP_NAME=$(node -p "require('./package.json').name")
+          - npm run build
+          - export IMAGE_NAME_BASE_NAME=fabfunnel-$BITBUCKET_DEPLOYMENT_ENVIRONMENT
+          - export IMAGE_NAME_COMMIT=ideaclan/$IMAGE_NAME_BASE_NAME:$BITBUCKET_COMMIT
+          - export IMAGE_NAME_LATEST=ideaclan/$IMAGE_NAME_BASE_NAME:latest
+          - export IMAGE_NAME_BRANCH=ideaclan/$IMAGE_NAME_BASE_NAME:${BITBUCKET_BRANCH//[\/]/_}
+          - echo $IMAGE_NAME_BRANCH
+          - docker build -t $IMAGE_NAME_COMMIT .
+          - docker build -t $IMAGE_NAME_LATEST .
+          - docker build -t $IMAGE_NAME_BRANCH .
+          - docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD
+          - docker push $IMAGE_NAME_COMMIT
+          - docker push $IMAGE_NAME_LATEST
+          - docker push $IMAGE_NAME_BRANCH
+        artifacts:
+          - build/**
+        caches:
+          - node
+          - docker
+        services:
+          - docker
+    - step: &deploy
+        script:
+          - UPDATE_CMD="set image deployment/$DEPLOYMENT_APP_NAME $DEPLOYMENT_APP_NAME=ideaclan/fabfunnel-staging:$BITBUCKET_COMMIT"
+          - echo $UPDATE_CMD
+          - pipe: atlassian/aws-eks-kubectl-run:2.2.0
+            variables:
+              CLUSTER_NAME: $AWS_PRODUCTION_CLUSTER_NAME
+              KUBECTL_COMMAND: $UPDATE_CMD
+image: node:20.12.0
+pipelines:
+  branches:
+    development:
+      - step:
+          <<: *package-install
+          size: 2x
+          name: Install Packages
+      - step:
+          <<: *package-build
+          size: 2x
+          name: Build for Staging
+          deployment: staging
+      - step:
+          <<: *deploy
+          name: Deploy to Staging
+          deployment: staging-eks
+    development/*:
+      - step:
+          name: Manual Deployment
+          script:
+            - echo "Manual Deploy"
+      - step:
+          <<: *package-install
+          trigger: "manual"
+          size: 2x
+          name: Install Packages
+      - step:
+          <<: *package-build
+          size: 2x
+          name: Build for Staging
+          deployment: staging
+      - parallel:
+          - step:
+              <<: *deploy
+              name: Deploy to Staging
+              trigger: "manual"
+              deployment: staging-eks
